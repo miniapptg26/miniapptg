@@ -20,9 +20,9 @@ var CFG = {
 /* Бот и связь с ЛС (https://t.me/ded_cmbot) */
 var BOT_USERNAME = 'ded_cmbot';
 var BOT_APP_SHORT = '';      // short_name Mini App из BotFather (/newapp) — если есть, ссылки станут короче
-var SYNC_URL = '';           // URL хранилища рейтинга (JSONBin и т.п.). Пусто = локальный режим
-var SYNC_TOKEN = '';
-var SYNC_BIN = '';
+var API_URL = '';            // адрес бэкенда, напр. https://ваш-проект.amvera.io. Пусто = оффлайн
+var SYNC_EVERY_MS = 5000;
+var _deltas = {gain:0, games:0, shop:0, clicks:0, lifetime:0, gamesPlayed:0, gamesWins:0, questsDone:0};
 
 var SECTIONS = [
   {id:'tanks',icon:'🧪',label:'Баки'},{id:'pods',icon:'📱',label:'Под-системы'},
@@ -93,6 +93,7 @@ function defaultSave(){
     questDate:null, questId:null, questTarget:0, questProgress:0, questClaimed:0, questReward:0, questDone:0,
     referrals:0, referrerId:0, ach:[],
     clan:null, notifications:[], unread:0,
+    combo:0, bestCombo:0, comboTill:0, lastSpin:null,
     createdAt:Date.now()
   };
 }
@@ -158,7 +159,7 @@ function bumpQuest(s, kind, amount){
 }
 function claimQuest(s){
   if(s.questDate!==todayStr() || !s.questId || s.questClaimed || s.questProgress<s.questTarget) return null;
-  s.questClaimed=1; s.questDone++; s.coins+=s.questReward;
+  s.questClaimed=1; s.questDone++; _deltas.questsDone += 1; s.coins+=s.questReward;
   pushNotify(s,'📋','Квест выполнен: +'+s.questReward+' 💨');
   return s.questReward;
 }
@@ -184,7 +185,9 @@ var ACHIEVEMENTS = [
   {id:'quest_7',name:'📋 Квест-мастер',desc:'Выполни 7 квестов',c:function(s){return s.questDone>=7;}},
   {id:'streak_7',name:'📆 Неделя пара',desc:'Серия 7 дней',c:function(s){return s.streak>=7;}},
   {id:'clan_1',name:'🏰 В клане',desc:'Создай клан',c:function(s){return !!s.clan;}},
-  {id:'ref_1',name:'🧲 Первый друг',desc:'Приведи друга',c:function(s){return s.referrals>=1;}}
+  {id:'ref_1',name:'🧲 Первый друг',desc:'Приведи друга',c:function(s){return s.referrals>=1;}},
+  {id:'combo_2',name:'🔥 Комбо-разгон',desc:'Серию из 16 кликов',c:function(s){return s.bestCombo>=16;}},
+  {id:'combo_5',name:'💫 Комбо-легенда',desc:'Серию из 32 кликов',c:function(s){return s.bestCombo>=32;}}
 ];
 function checkAch(s){
   var fresh = [];
@@ -204,7 +207,7 @@ function offlineGain(s){
   var gain = Math.round(totalAuto(s)*CFG.TICKS_PER_MIN*Math.min(minutes,CFG.OFFLINE_MAX_MIN));
   if(gain>0){
     s.coins+=gain; s.lifetime+=gain; s.offlineTotal+=gain;
-    pushNotify(s,'🌙','Офлайн-доход: +'+gain+' 💨 ('+Math.min(minutes,CFG.OFFLINE_MAX_MIN)+' мин)');
+    pushNotify(s,'🌙','Офлайн-доход: +'+gain+' 💨 · '+Math.min(minutes,CFG.OFFLINE_MAX_MIN)+' мин');
     bumpQuest(s,'offline',gain);
   }
   s.lastActive=now;
@@ -233,15 +236,20 @@ function applyReferral(s, startParam){
 /* ---- Клик ---- */
 function doClick(s){
   var now = Date.now();
+  if(now - (s._lastClickT||0) <= 1500){ s.combo = (s.combo||0)+1; } else { s.combo = 1; }
+  s._lastClickT = now; s.comboTill = now + 1500;
+  var comboMult = 1 + Math.min(Math.floor(s.combo/8), 4); // x1..x5: каждые 8 кликов подряд +1
+  if(s.combo >= s.bestCombo) s.bestCombo = s.combo;
   var crit = Math.random()*100 < totalCrit(s);
-  var gain = totalClickPower(s)*(crit?2:1);
-  var turbo = turboActive(s);
-  if(turbo) gain*=3;
+  var gain = totalClickPower(s)*(crit?2:1)*comboMult;
+  var turbo = turboActive(s); if(turbo) gain*=3;
+  var luck = Math.random() < 0.04; // удача: случайный бонус x2 со штукой
+  if(luck) gain *= 2;
   var line = PUFF_LINES[Math.floor(Math.random()*PUFF_LINES.length)];
   s.coins+=gain; s.clicks+=1; s.lifetime+=gain; s.lastActive=now;
-  bumpQuest(s,'puffs',1);
-  if(crit) bumpQuest(s,'crits',1);
-  return {gain:gain, crit:crit, turbo:turbo, line:line};
+  _deltas.gain += gain; _deltas.clicks += 1; _deltas.lifetime += gain;
+  bumpQuest(s,'puffs',1); if(crit) bumpQuest(s,'crits',1);
+  return {gain:gain, crit:crit, turbo:turbo, comboMult:comboMult, combo:s.combo, luck:luck, line:line};
 }
 
 /* ---- Покупки ---- */
@@ -250,7 +258,7 @@ function buyItem(s, id){
   if(!it) return {ok:false,msg:'Нет такого товара'};
   if(s.owned.indexOf(id)!==-1) return {ok:false,msg:'Уже в арсенале ✅'};
   if(s.coins < it.price) return {ok:false,msg:'Не хватает 💨: нужно '+it.price};
-  s.coins-=it.price; s.owned.push(id);
+  s.coins-=it.price; _deltas.shop -= it.price; s.owned.push(id);
   var b=it.b;
   s.cAdd+=b.c_add||0; s.aAdd+=b.a_add||0; s.critP+=b.crit_p||0;
   s.clickP+=b.click_p||0; s.autoP+=b.auto_p||0; s.dailyP+=b.daily_p||0;
@@ -262,7 +270,7 @@ function buyUpgrade(s, kind){
   var lvl = kind==='click'?s.clickPower:kind==='auto'?s.autoLevel:s.critLevel;
   var cost = upgCost(kind,lvl);
   if(s.coins<cost) return {ok:false,msg:'Нужно '+cost+' 💨'};
-  s.coins-=cost;
+  s.coins-=cost; _deltas.shop -= cost;
   if(kind==='click') s.clickPower++; else if(kind==='auto') s.autoLevel++; else s.critLevel++;
   var lbl = kind==='click'?'🧶 Вата':kind==='auto'?'🌀 Койл':'🧪 Крит-мод';
   return {ok:true,msg:lbl+' → ур. '+(lvl+1)};
@@ -278,15 +286,15 @@ function claimDaily(s){
   var mult = 1 + Math.min(Math.max(s.streak-1,0),30)*0.02;
   var reward = Math.round(dailyBase(s)*mult);
   s.coins+=reward;
-  pushNotify(s,'🎁','Дневная заправка: +'+reward+' 💨'+(s.streak>=2?' (серия '+s.streak+')':''));
-  return {ok:true,msg:'+'+reward+' 💨'+(s.streak>=2?' (серия '+s.streak+' дн.! )':''), streak:s.streak};
+  pushNotify(s,'🎁','Дневная заправка: +'+reward+' 💨'+(s.streak>=2?' · серия '+s.streak:''));
+  return {ok:true,msg:'+'+reward+' 💨'+(s.streak>=2?' · серия '+s.streak+' дн.!':''), streak:s.streak};
 }
 
 /* ---- Престиж ---- */
 function doPrestige(s){
   var cost = prestigeCost(s);
   if(s.coins<cost) return {ok:false,msg:'Нужно '+cost+' 💨'};
-  s.coins=0; s.clicks=0; s.clickPower=1; s.autoLevel=0; s.critLevel=0;
+  s.coins=0; _deltas.shop -= cost; s.clicks=0; s.clickPower=1; s.autoLevel=0; s.critLevel=0;
   s.cAdd=0;s.aAdd=0;s.critP=0;s.clickP=0;s.autoP=0;s.dailyP=0;
   s.owned=[]; s.prestige++;
   pushNotify(s,'✨','Престиж '+s.prestige+'! +10% к затяжке навсегда');
@@ -297,30 +305,40 @@ function doPrestige(s){
 function buyTurbo(s){
   if(turboActive(s)) return {ok:false,msg:'Турбо уже активен!'};
   if(s.coins<CFG.TURBO_COST) return {ok:false,msg:'Нужно '+CFG.TURBO_COST+' 💨'};
-  s.coins-=CFG.TURBO_COST; s.turboUntil=Date.now()/1000+CFG.TURBO_SEC; s.turboCount++;
+  s.coins-=CFG.TURBO_COST; _deltas.shop -= CFG.TURBO_COST; s.turboUntil=Date.now()/1000+CFG.TURBO_SEC; s.turboCount++;
   bumpQuest(s,'turbo',1);
   pushNotify(s,'⚡','Турбо x3 на 2 минуты!');
   return {ok:true,msg:'⚡ Турбо x3 на 2 минуты!'};
 }
 
-/* ---- Кланы (локальные, без рейтинга) ---- */
+/* ---- Спин дня ---- */
+function spinDay(s){
+  var today = todayStr();
+  if(s.lastSpin===today) return {ok:false,msg:'Спин уже крутил сегодня — завтра!'};
+  var prize = pick([500, 1000, 2000, 5000]);
+  s.coins += prize; s.lastSpin = today;
+  pushNotify(s,'🎡','Спин дня: +'+prize+' 💨!');
+  return {ok:true,msg:'🎡 Спин: +'+prize+' 💨!', prize:prize};
+}
+
+/* ---- Кланы локальные ---- */
 function clanCreate(s, name){
   name=(name||'').trim();
   if(s.clan) return {ok:false,msg:'Ты уже в клане'};
   if(name.length<2||name.length>20) return {ok:false,msg:'Название 2-20 символов'};
   if(s.coins<CFG.CLAN_COST) return {ok:false,msg:'Нужно '+CFG.CLAN_COST+' 💨'};
-  s.coins-=CFG.CLAN_COST;
+  s.coins-=CFG.CLAN_COST; _deltas.shop -= CFG.CLAN_COST;
   s.clan={name:name, code:rnd(100000,999999), score:0, contributed:0, level:1, createdAt:Date.now()};
   pushNotify(s,'🏰','Клан «'+name+'» создан! Код: '+s.clan.code);
   checkAch(s);
-  return {ok:true,msg:'🏰 Клан «'+name+'» создан! Код: '+s.clan.code+' (сохрани его)'};
+  return {ok:true,msg:'🏰 Клан «'+name+'» создан! Код: '+s.clan.code+' — сохрани его'};
 }
 function clanContribute(s, amount){
   amount = parseInt(amount,10)||0;
   if(!s.clan) return {ok:false,msg:'Ты не в клане'};
   if(amount<CFG.CLAN_MIN_CONTRIB) return {ok:false,msg:'Минимум '+CFG.CLAN_MIN_CONTRIB+' 💨'};
   if(s.coins<amount) return {ok:false,msg:'Не хватает 💨'};
-  s.coins-=amount; s.clan.contributed+=amount; s.clan.score+=amount;
+  s.coins-=amount; _deltas.shop -= amount; s.clan.contributed+=amount; s.clan.score+=amount;
   var lvl = clanLevelOf(s.clan.score);
   if(lvl>s.clan.level){
     s.clan.level=lvl;
@@ -336,28 +354,23 @@ function clanLeave(s){
   return {ok:true,msg:'Ты вышел из клана'};
 }
 
-/* ---- Рейтинг (ручное обновление) ---- */
-function lbCache(){ if(typeof localStorage==='undefined') return []; try{ var r=localStorage.getItem('vc_board'); return r?JSON.parse(r):[]; }catch(e){ return []; } }
-function lbSave(arr){ try{ localStorage.setItem('vc_board', JSON.stringify(arr)); }catch(e){} }
-function lbLoad(){
-  if(!SYNC_URL) return Promise.resolve(null);
-  return fetch(SYNC_URL,{headers:{'X-Master-Key':SYNC_TOKEN}}).then(function(r){ return r.json(); }).catch(function(){ return null; });
-}
-function lbPush(s){
-  if(!SYNC_URL) return Promise.resolve(false);
-  return fetch(SYNC_URL,{method:'POST',headers:{'Content-Type':'application/json','X-Master-Key':SYNC_TOKEN,'X-Bin-ID':SYNC_BIN},
-    body:JSON.stringify({id:''+s.tg, name:s.name||('id'+s.tg), coins:s.coins, lifetime:s.lifetime, clicks:s.clicks, prestige:s.prestige})})
-    .then(function(){ return true; }).catch(function(){ return false; });
-}
-
 /* ---- Игры ---- */
-function finishGame(s, won, profit){
-  s.gamesPlayed++; if(won) s.gamesWins++;
-  s.coins = Math.max(0, s.coins + profit);
-  bumpQuest(s,'games',1);
-  if(won) bumpQuest(s,'wins',1);
-  return profit;
+function gameStart(s, stake){
+  stake = parseInt(stake,10)||0;
+  if(stake < CFG.MIN_STAKE) return {ok:false, msg:'Мин ставка '+CFG.MIN_STAKE+' 💨'};
+  if(stake > s.coins) return {ok:false, msg:'Не хватает 💨'};
+  s.coins -= stake; _deltas.games -= stake;
+  return {ok:true, bet:stake};
 }
+function gameEnd(s, won, payout){
+  payout = Math.max(0, parseInt(payout,10)||0);
+  s.gamesPlayed++; if(won) s.gamesWins++;
+  s.coins += payout; _deltas.games += payout;
+  bumpQuest(s,'games',1); if(won) bumpQuest(s,'wins',1);
+  _deltas.gamesPlayed += 1; if(won) _deltas.gamesWins += 1;
+  return payout;
+}
+function finishGame(s, won, payout){ return gameEnd(s, won, payout); }
 function playRoulette(s, betType, num){
   var n=rnd(0,36);
   var red=[1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36].indexOf(n)!==-1;
@@ -406,6 +419,36 @@ function loadSave(){
   return {save:s, offline:off, refMsg:refMsg};
 }
 function save(){ try{ localStorage.setItem('vc_save_'+S.save.tg, JSON.stringify(S.save)); }catch(e){} }
+function tgInitData(){ try{ return (Tg && Tg.initData)? Tg.initData:''; }catch(e){ return ''; } }
+function apiCall(path, payload){
+  if(!API_URL) return Promise.resolve(null);
+  return fetch(API_URL+path, {method: payload?'POST':'GET', headers:{'Content-Type':'application/json'},
+    body: payload? JSON.stringify(payload): undefined}).then(function(r){ return r.json(); }).catch(function(){ return null; });
+}
+function apiInit(s){
+  if(!API_URL) return Promise.resolve(null);
+  return apiCall('/api/init', {initData: tgInitData()}).then(function(res){
+    if(res && res.ok && res.user){ if(res.user.coins > s.coins) s.coins = res.user.coins; return res.user; }
+    return null;
+  });
+}
+function apiFlush(s){
+  if(!API_URL) return Promise.resolve(false);
+  var d=_deltas;
+  if(!d.gain && !d.games && !d.shop && !d.clicks && !d.gamesPlayed && !d.questsDone) return Promise.resolve(false);
+  return apiCall('/api/sync', {initData: tgInitData(), d:{
+    coins_clicks: Math.round(d.gain), coins_games: Math.round(d.games), coins_shop: Math.round(d.shop),
+    clicks: d.clicks, lifetime: Math.round(d.lifetime),
+    gamesPlayed: d.gamesPlayed, gamesWins: d.gamesWins, questsDone: d.questsDone,
+    bestCombo: s.bestCombo||0, prestige: s.prestige||0
+  }}).then(function(res){
+    if(res && res.ok){ d.gain=0; d.games=0; d.shop=0; d.clicks=0; d.lifetime=0; d.gamesPlayed=0; d.gamesWins=0; d.questsDone=0; return true; }
+    return false;
+  });
+}
+function apiTop(n){
+  return apiCall('/api/top?n='+(n||10)).then(function(res){ return (res && res.ok && res.top)? res.top : null; });
+}
 function fmt(n){ try{ return Math.round(n).toLocaleString('ru-RU'); }catch(e){ return ''+n; } }
 function bonusStr(b){ var parts=[]; if(b.c_add)parts.push('+'+b.c_add+' 💨 затяжка'); if(b.a_add)parts.push('+'+b.a_add+' 💨 авто'); if(b.click_p)parts.push('+'+b.click_p+'% затяжка'); if(b.auto_p)parts.push('+'+b.auto_p+'% авто'); if(b.crit_p)parts.push('+'+b.crit_p+'% крит'); if(b.daily_p)parts.push('+'+b.daily_p+'% дневной'); return parts.join(', ')||'—'; }
 
@@ -427,22 +470,26 @@ function render(){
 }
 function homeHtml(s){
   var tot={c:totalClickPower(s),a:totalAuto(s),cr:totalCrit(s)}, turbo=turboActive(s), nxt=nextRank(s.clicks);
+  if(s.combo && Date.now()-(s._lastClickT||0)>1500) s.combo=0;
   var h='<div class="clickzone"><button class="bigbtn" data-act="click">💨</button>'+
-    '<div class="clickinfo">💨 Затянуться (<span class="plus">+'+fmt(tot.c)+'</span>'+(turbo?' · ⚡x3':'')+')</div>'+
-    '<div class="puffline" id="puffline"></div></div>';
+    '<div class="clickinfo">💨 Затянуться <span class="plus">+'+fmt(tot.c)+'</span>'+(turbo?' · ⚡x3':'')+'</div>'+
+    '<div class="puffline" id="puffline"></div>'+
+    (s.bestCombo>0?'<div class="combo" id="comboline">🔥 Лучшее комбо: '+s.bestCombo+'</div>':'<div class="combo" id="comboline"></div>')+'</div>';
   h+='<div class="card glow"><div class="stat"><span>⭐ Ранг</span><b>'+rankOf(s.clicks)+'</b></div>';
   if(nxt) h+='<div class="stat"><span>До «'+nxt.name+'»</span><b>'+fmt(nxt.need)+' затяжек</b></div>';
   h+='<div class="stat"><span>⚡ Затяжка</span><b>'+fmt(tot.c)+' 💨</b></div>'+
     '<div class="stat"><span>🌀 Автофарм</span><b>'+fmt(tot.a)+' 💨/'+CFG.TICK_SEC+'с</b></div>'+
     '<div class="stat"><span>🧪 Крит</span><b>'+tot.cr+'%</b></div>'+
-    '<div class="stat"><span>✨ Престиж</span><b>'+s.prestige+' (+'+Math.min(s.prestige,CFG.MAX_PRESTIGE)*10+'%)</b></div>'+
-    (s.clan?'<div class="stat"><span>🏰 Клан</span><b>«'+s.clan.name+'» ур.'+s.clan.level+' (+'+clanBonusOf(s.clan.level)+'%)</b></div>':'')+
+    '<div class="stat"><span>✨ Престиж</span><b>'+s.prestige+' · +'+(Math.min(s.prestige,CFG.MAX_PRESTIGE)*10)+'%</b></div>'+
+    (s.clan?'<div class="stat"><span>🏰 Клан</span><b>«'+s.clan.name+'» ур.'+s.clan.level+' · +'+clanBonusOf(s.clan.level)+'%</b></div>':'')+
     (turbo?'<div class="stat"><span>⚡ Турбо x3</span><b>'+Math.ceil(s.turboUntil-Date.now()/1000)+' сек</b></div>':'')+'</div>';
   h+='<div class="grid2">'+
     '<button class="btn ghost small" data-act="daily">🎁 Дневная</button>'+
     '<button class="btn gold small" data-act="turbo">⚡ Турбо x3<br><span class="muted">'+fmt(CFG.TURBO_COST)+' 💨</span></button>'+
+    '<button class="btn ghost small" data-act="spin">🎡 Спин дня</button>'+
     '<button class="btn green small" data-act="prestige">✨ Престиж</button>'+
     '<button class="btn ghost small" data-act="invite">🔗 Пригласить</button>'+
+    '<button class="btn ghost small" data-act="top">🏆 Топ</button>'+
   '</div>';
   return h;
 }
@@ -503,9 +550,9 @@ function questHtml(s){
 function clanHtml(s){
   var h='<div class="h1">🏰 Клан</div>';
   if(!s.clan){
-    h+='<div class="card"><div class="muted" style="margin-bottom:10px">Ты ещё не в клане. Создай свой — это даёт постоянный бонус к затяжке и автофарму (каждый уровень +1%).</div>'+
-    '<button class="btn gold" data-act="clancreate">➕ Создать клан ('+fmt(CFG.CLAN_COST)+' 💨)</button>'+
-    '<div class="note">Сейчас клан хранится локально — общие члены и клановый рейтинг появятся с бэкендом. Ссылка на ЛС с ботом: <b>'+botChatLink()+'</b></div></div>';
+    h+='<div class="card"><div class="muted" style="margin-bottom:10px">Ты ещё не в клане. Создай свой — это даёт постоянный бонус к затяжке и автофарму — каждый уровень +1%.</div>'+
+    '<button class="btn gold" data-act="clancreate">➕ Создать клан '+fmt(CFG.CLAN_COST)+' 💨</button>'+
+    '<div class="note">Сейчас клан хранится локально — общие члены появятся с бэкендом. Ссылка на ЛС с ботом: <b>'+botChatLink()+'</b></div></div>';
   } else{
     var l=clanLevelOf(s.clan.score), bns=clanBonusOf(l);
     h+='<div class="card glow"><div class="lvlring"><div class="lvl">'+l+'</div><div><div class="h2" style="margin:0 0 4px">«'+s.clan.name+'»</div><div class="muted">Код: <b style="color:var(--gold)">'+s.clan.code+'</b> · Бонус +'+bns+'%</div></div></div>'+
@@ -517,8 +564,7 @@ function clanHtml(s){
     '<div class="chips"><button class="chip" data-act="clanq" data-arg="500">500</button><button class="chip" data-act="clanq" data-arg="1000">1 000</button><button class="chip" data-act="clanq" data-arg="5000">5 000</button></div>'+
     '<button class="btn danger small" data-act="clanleave">🚪 Покинуть клан</button></div>';
   }
-  h+='<div class="h2">🏆 Рейтинг</div><div class="card"><div class="muted">Ручное обновление: нажми «Обновить». Сервер не настроен — смотри свой локальный рейтинг и настрой SYNC_URL в app.js для общего.</div>'+
-    '<button class="btn small" data-act="leaderboard">🏆 Открыть рейтинг</button></div>';
+  h+='<div class="h2">ℹ️ О клане</div><div class="card"><div class="muted">Клан хранится локально на устройстве — общие члены появятся после подключения бэкенда.</div></div>';
   return h;
 }
 function profileHtml(s){
@@ -529,27 +575,29 @@ function profileHtml(s){
     '<div class="stat"><span>⭐ Ранг</span><b>'+rankOf(s.clicks)+'</b></div>'+
     '<div class="stat"><span>👆 Затяжек</span><b>'+fmt(s.clicks)+'</b></div>'+
     '<div class="stat"><span>☁️ Пар за всё время</span><b>'+fmt(s.lifetime)+' 💨</b></div>'+
-    '<div class="stat"><span>🌙 Офлайн-доход (всего)</span><b>'+fmt(s.offlineTotal)+' 💨</b></div>'+
+    '<div class="stat"><span>🌙 Офлайн-доход всего</span><b>'+fmt(s.offlineTotal)+' 💨</b></div>'+
     '<div class="stat"><span>🔥 Серия</span><b>'+s.streak+(s.streak?' дн.':'')+'</b></div>'+
+    '<div class="stat"><span>🔥 Лучшее комбо</span><b>'+s.bestCombo+'</b></div>'+
     '<div class="stat"><span>✨ Престиж</span><b>'+s.prestige+'</b></div>'+
     '<div class="stat"><span>🎲 Игры</span><b>'+s.gamesPlayed+' сыграно · '+s.gamesWins+' побед</b></div>'+
     '<div class="stat"><span>🔗 Рефералов</span><b>'+s.referrals+'</b></div>'+
     '<div class="stat"><span>⚡ Затяжка / 🌀 Авто</span><b>'+fmt(tot.c)+' / '+fmt(tot.a)+'</b></div>'+
     '<div class="stat"><span>🧪 Крит</span><b>'+tot.cr+'%</b></div></div>';
   h+='<div class="h2">🔗 Ссылки и связь с ботом</div><div class="card">'+
-    '<button class="btn small" data-act="botopen">💬 Написать боту (@'+BOT_USERNAME+')</button>'+
+    '<button class="btn small" data-act="botopen">💬 Написать боту @'+BOT_USERNAME+'</button>'+
     '<div class="row" style="margin:8px 0"><button class="btn ghost small" data-act="invite">🔗 Пригласить друга</button>'+
     '<button class="btn ghost small" data-act="botsave">📤 Привязать ID к боту</button></div>'+
-    '<div class="muted">Бот может слать уведомления в ЛС (офлайн-заработок, приглашённые). Настрой хендлеры в README.</div></div>';
-  h+='<div class="h2">🏅 Достижения ('+s.ach.length+'/'+ACHIEVEMENTS.length+')</div><div class="card">';
+    '<div class="muted">Бот может слать уведомления в ЛС — офлайн-заработок, приглашённые. Настрой хендлеры в README.</div></div>';
+  h+='<div class="h2">🏅 Достижения '+s.ach.length+'/'+ACHIEVEMENTS.length+'</div><div class="card">';
   ACHIEVEMENTS.forEach(function(a){
     var on = s.ach.indexOf(a.id)!==-1;
     h+='<div class="ach'+(on?'':' locked')+'"><span class="a-ic">'+(on?a.name.slice(0,2):'🔒')+'</span><span>'+a.name+'<br><small class="muted">'+a.desc+'</small></span></div>';
   });
   h+='</div>';
   h+='<div class="h2">🗑 Данные</div><div class="card">'+
-    '<div class="muted">Прогресс хранится локально (localStorage).</div>'+
+    '<div class="muted">Прогресс хранится локально в localStorage.</div>'+
     '<button class="btn danger small" data-act="reset" style="margin-top:8px">🗑 Сбросить прогресс</button></div>';
+  h+='<div class="h2">🏆 Топ по балансу</div><div class="card"><button class="btn ghost small" data-act="top">🏆 Открыть топ</button></div>';
   return h;
 }
 
@@ -594,13 +642,13 @@ function renderModal(){
         '</div>';
     } else if(g==='coin'){
       inner = '<div class="h1">🪙 Орёл / Решка</div><div class="muted" style="margin-bottom:10px">50/50, выигрыш x2</div>' +
-        '<button class="btn gold" data-act="stake" data-arg="coin">🪙 Сыграть (своя ставка)</button>';
+        '<button class="btn gold" data-act="stake" data-arg="coin">🪙 Сыграть</button>';
     } else if(g==='blackjack'){
       inner = '<div class="h1">🃏 Блэкджек</div><div class="muted" style="margin-bottom:10px">Против банка. Туз = 11/1, В/Д/К = 10. Собери 21 или перебей банк!</div>' +
-        '<button class="btn" data-act="stake" data-arg="blackjack">🃏 Сыграть (своя ставка)</button>';
+        '<button class="btn" data-act="stake" data-arg="blackjack">🃏 Сыграть</button>';
     } else if(g==='mines'){
       inner = '<div class="h1">💣 Сапёр</div><div class="muted" style="margin-bottom:10px">Поле 3×3 с 2 минами. Открывай клетки — множитель растёт. Мина = проигрыш!</div>' +
-        '<button class="btn" data-act="stake" data-arg="mines">💣 Старт (своя ставка)</button>';
+        '<button class="btn" data-act="stake" data-arg="mines">💣 Старт</button>';
     }
     inner += '<button class="btn ghost small" data-act="closemodal" style="margin-top:10px">⬅️ Назад</button>';
   }
@@ -609,7 +657,7 @@ function renderModal(){
     var gt = {roulette:'🎡 Рулетка',dice:'🎲 Кубики',coin:'🪙 Орёл/Решка',blackjack:'🃏 Блэкджек',mines:'💣 Сапёр'}[gname]||'🎮 Игра';
     var lab = gt+' — ставка на «'+stakeLabel(modal.data.arg)+'»';
     inner = '<div class="h1">'+lab+'</div>' +
-      '<input type="number" id="stake-inp" min="'+CFG.MIN_STAKE+'" placeholder="Ставка (мин '+CFG.MIN_STAKE+')">' +
+      '<input type="number" id="stake-inp" min="'+CFG.MIN_STAKE+'" placeholder="Ставка">' +
       '<button class="btn" data-act="dogame">🎲 Сыграть</button>' +
       '<button class="btn ghost small" data-act="gameback" data-arg="'+gname+'">⬅️ Назад</button>';
   }
@@ -643,9 +691,6 @@ function renderModal(){
     });
     inner += '</div>';
   }
-  else if(t==='leaderboard'){
-    inner = leaderboardHtml(s);
-  }
   else if(t==='input'){
     inner = '<div class="h1">'+(modal.data.title||'Ввод')+'</div>' +
       '<input type="text" id="inp-val" placeholder="'+(modal.data.placeholder||'')+'">' +
@@ -655,7 +700,7 @@ function renderModal(){
   }
   else if(t==='clancontrib'){
     inner = '<div class="h1">💪 Вклад в клан</div>' +
-      '<div class="muted">Минимум '+fmt(CFG.CLAN_MIN_CONTRIB)+' 💨. Каждые '+fmt(CFG.CLAN_SCORE_PER_LVL)+' очков — уровень (+1% бонус).</div>' +
+      '<div class="muted">Минимум '+fmt(CFG.CLAN_MIN_CONTRIB)+' 💨. Каждые '+fmt(CFG.CLAN_SCORE_PER_LVL)+' очков — уровень +1% бонус.</div>' +
       '<div class="chips">' +
         '<button class="chip" data-act="clanq" data-arg="500">500</button>' +
         '<button class="chip" data-act="clanq" data-arg="1000">1 000</button>' +
@@ -668,7 +713,7 @@ function renderModal(){
   }
   else if(t==='prestige'){
     inner = '<div class="h1">✨ Перерождение</div>' +
-      '<div class="note">Сбросит монеты, затяжки, прокачку, устройства. Сохранит: достижения, квесты, рефералов, серию.<br><br>Навсегда: <b>+10% к затяжке</b> (до +200%).</div>' +
+      '<div class="note">Сбросит монеты, затяжки, прокачку, устройства. Сохранит: достижения, квесты, рефералов, серию.<br><br>Навсегда: <b>+10% к затяжке</b> — до +200%.</div>' +
       '<div class="stat"><span>Стоимость</span><b>'+fmt(prestigeCost(s))+' 💨</b></div>' +
       '<button class="btn danger" data-act="prestigedo">✨ Переродиться</button>' +
       '<button class="btn ghost small" data-act="closemodal">Отмена</button>';
@@ -681,27 +726,23 @@ function renderModal(){
         '<button class="btn danger" data-act="clanleaveyes">🚪 Выйти</button>' +
       '</div>';
   }
+  else if(t==='top'){
+    var list = modal.data.list;
+    inner = '<div class="h1">🏆 Топ по балансу</div>';
+    if(list && list.length){
+      var medals=['🥇','🥈','🥉'];
+      for(var ti=0;ti<list.length;ti++){
+        var u=list[ti];
+        var nm=u.username||('id'+u.user_id);
+        inner += '<div class="rating-row"><span class="place">'+(medals[ti]||((ti+1)+'.'))+'</span><span class="nm2">'+nm+'</span><span class="sc">'+fmt(u.coins)+' 💨</span></div>';
+      }
+    } else {
+      inner += '<div class="muted">'+(API_URL?'Пока пусто — стань первым!':'Сервер не настроен. Впиши API_URL в app.js и задеплой бэкенд — тогда топ станет общим.')+'</div>';
+    }
+    inner += '<button class="btn ghost small" data-act="closemodal" style="margin-top:10px">Закрыть</button>';
+  }
   root.innerHTML = '<div class="mbackdrop" data-act="closemodal"></div><div class="modal">'+inner+'</div>';
   root.classList.add('open');
-}
-function leaderboardHtml(s){
-  var arr = lbCache();
-  var h = '<div class="h1">🏆 Рейтинг</div>';
-  if(!SYNC_URL) h += '<div class="note">SYNC_URL не настроен — показываю локальный кэш. Для общего рейтинга впиши SYNC_URL/SYNC_TOKEN/SYNC_BIN в начале app.js.</div>';
-  h += '<div class="row">' +
-    '<button class="btn small" data-act="lbup">🔄 Обновить</button>' +
-    '<button class="btn ghost small" data-act="lbsend">📤 Отправить</button>' +
-  '</div>';
-  h += '<div class="nlist" style="margin-top:10px">';
-  if(!arr || !arr.length) h += '<div class="muted">Пока пусто — нажми «📤 Отправить», чтобы попасть в рейтинг.</div>';
-  else{
-    var sorted = arr.slice().sort(function(a,b){ return ((b.lifetime||0)-(a.lifetime||0)) || ((b.coins||0)-(a.coins||0)); });
-    sorted.forEach(function(e,i){
-      h += '<div class="rating-row"><span class="place">'+(i+1)+'</span><span class="nm2">'+(e.name||('id'+e.id))+'</span><span class="sc">'+fmt(e.lifetime||0)+' 💨</span></div>';
-    });
-  }
-  h += '</div>';
-  return h;
 }
 function stakeLabel(arg){
   return {num:'🎯 число',red:'🔴 красное',black:'⚫ чёрное',d1:'1-12',d2:'13-24',d3:'25-36',gt:'больше 7',lt:'меньше 7',eq:'ровно 7',coin:'🪙 орёл/решка',blackjack:'🃏 блэкджек',mines:'💣 сапёр'}[arg]||arg;
@@ -710,10 +751,10 @@ function bjHtml(st){
   var hv = handVal(st.hand), bv = handVal(st.bank);
   var h = '<div class="h1">🃏 Блэкджек</div>';
   h += '<div class="card"><div class="muted">Твои карты:</div><div style="font-size:22px">'+(st.hand.map(function(c){return c.v+c.s;}).join(' '))+'</div><div class="stat"><span>Сумма</span><b>'+hv+'</b></div></div>';
-  h += '<div class="card"><div class="muted">Банк '+(st.done?'':('(' + (st.bank[0]?st.bank[0].v+st.bank[0].s:'') + ' + скрытая)'))+'</div><div style="font-size:22px">'+(st.done?st.bank.map(function(c){return c.v+c.s;}).join(' '):((st.bank[0]?st.bank[0].v+st.bank[0].s:'')+' 🂠'))+'</div>'+(st.done?'<div class="stat"><span>Сумма</span><b>'+handVal(st.bank)+'</b></div>':'')+'</div>';
+  h += '<div class="card"><div class="muted">Банк '+(st.done?'':((st.bank[0]?st.bank[0].v+st.bank[0].s:'')+' + скрытая'))+'</div><div style="font-size:22px">'+(st.done?st.bank.map(function(c){return c.v+c.s;}).join(' '):((st.bank[0]?st.bank[0].v+st.bank[0].s:'')+' 🂠'))+'</div>'+(st.done?'<div class="stat"><span>Сумма</span><b>'+handVal(st.bank)+'</b></div>':'')+'</div>';
   if(st.done){
-    var txt = st.result==='win'?'🎉 ПОБЕДА! (x2)':st.result==='draw'?'🤝 Ничья, ставка вернулась':'💸 ПРОИГРЫШ';
-    h += '<div class="card"><b>'+txt+'</b><div class="muted">('+fmt(st.stake||0)+' 💨)</div></div>';
+    var txt = st.result==='win'?'🎉 ПОБЕДА! x2':st.result==='draw'?'🤝 Ничья, ставка вернулась':'💸 ПРОИГРЫШ';
+    h += '<div class="card"><b>'+txt+'</b><div class="muted">'+fmt(st.bet||0)+' 💨</div></div>';
     h += '<button class="btn" data-act="gameback" data-arg="blackjack">🃏 Ещё партию</button>';
   } else {
     h += '<div class="row">' +
@@ -741,7 +782,7 @@ function minesHtml(st){
   }
   h += '</div>';
   if(st.done){
-    if(st.won) h += '<div class="card"><b>🎉 ВЫИГРЫШ x'+st.mult.toFixed(1)+' ('+fmt(st.stake||0)+' 💨)</b></div>';
+    if(st.won) h += '<div class="card"><b>🎉 ВЫИГРЫШ x'+st.mult.toFixed(1)+' · '+fmt(st.bet||0)+' 💨</b></div>';
     else h += '<div class="card"><b>💥 БУМ! Проигрыш</b></div>';
     h += '<button class="btn" data-act="gameback" data-arg="mines">💣 Ещё раз</button>';
   } else if(st.revealed>0){
@@ -763,11 +804,21 @@ var ACTIONS = {
     render();
     var pl=document.getElementById('puffline');
     if(pl) pl.textContent = (r.crit?'🧪 КРИТ! ':(r.turbo?'⚡ ТУРБО! ':'💨 '))+'+'+fmt(r.gain)+' 💨 '+r.line;
+    var cb=document.getElementById('comboline');
+    if(cb){
+      if(r.comboMult>1) cb.textContent = '🔥 Комбо x'+r.comboMult+'! '+r.combo+' кликов';
+      else if(s.bestCombo>0) cb.textContent = '🔥 Лучшее комбо: '+s.bestCombo;
+      else cb.textContent = '';
+    }
     if(Tg&&Tg.HapticFeedback) Tg.HapticFeedback.impactOccurred('heavy');
   },
   daily:function(){
     var s=S.save; var r=claimDaily(s); save(); checkAch(s); toast(r.msg); render();
   },
+  spin:function(){
+    var r=spinDay(S.save); save(); checkAch(S.save); toast(r.msg); render();
+  },
+  top:function(){ apiTop(10).then(function(list){ openModal('top', {list:list}); }); },
   turbo:function(){
     var r=buyTurbo(S.save); save(); checkAch(S.save); toast(r.msg); render();
   },
@@ -815,37 +866,42 @@ var ACTIONS = {
     if(stake>s.coins){ toast('Не хватает 💨!'); return; }
     var g=modal.data.game, arg=modal.data.arg;
     if(g==='roulette'){
+      var st=gameStart(s,stake); if(!st.ok){toast(st.msg);return;}
       var r=playRoulette(s,arg,parseInt(modal.data.num||'0',10));
-      var profit=r.win?stake*r.mult-stake:-stake;
+      var payout=r.win?st.bet*r.mult:0;
       var col=r.n===0?'🟢':r.red?'🔴':'⚫';
-      finishGame(s,r.win,profit); save(); checkAch(s);
-      toast('🎡 '+r.n+' '+col+(r.win?' 🎉 +'+fmt(profit)+' 💨 (x'+r.mult+')':' 💸 −'+fmt(stake)+' 💨'));
+      gameEnd(s,r.win,payout); save(); checkAch(s);
+      toast('🎡 '+r.n+' '+col+(r.win?' 🎉 +'+fmt(payout)+' 💨':' 💸 −'+fmt(st.bet)+' 💨'));
       render(); closeModal();
       return;
     }
     if(g==='dice'){
+      var st=gameStart(s,stake); if(!st.ok){toast(st.msg);return;}
       var d=playDice(s,arg);
-      var profit2=d.win?stake*d.mult-stake:-stake;
-      finishGame(s,d.win,profit2); save(); checkAch(s);
-      toast('🎲 '+d.a+' + '+d.b+' = '+d.total+(d.win?' 🎉 +'+fmt(profit2)+' 💨':' 💸 −'+fmt(stake)+' 💨'));
+      var payout=d.win?st.bet*d.mult:0;
+      gameEnd(s,d.win,payout); save(); checkAch(s);
+      toast('🎲 '+d.a+' + '+d.b+' = '+d.total+(d.win?' 🎉 +'+fmt(payout)+' 💨':' 💸 −'+fmt(st.bet)+' 💨'));
       render(); closeModal();
       return;
     }
     if(g==='coin'){
-      var c=playCoin();
-      var profit3=c.heads?stake:-stake;
-      finishGame(s,c.heads,profit3); save(); checkAch(s);
-      toast(c.heads?'🪙 Орёл! 🎉 +'+fmt(profit3)+' 💨':'🪙 Решка! 💸 −'+fmt(stake)+' 💨');
+      var st=gameStart(s,stake); if(!st.ok){toast(st.msg);return;}
+      var heads=playCoin().heads;
+      var payout=heads?st.bet*2:0;
+      gameEnd(s,heads,payout); save(); checkAch(s);
+      toast(heads?'🪙 Орёл! 🎉 +'+fmt(payout)+' 💨':'🪙 Решка! 💸 −'+fmt(st.bet)+' 💨');
       render(); closeModal();
       return;
     }
     if(g==='blackjack'){
-      _bjGame=bjDeal(bjState()); _bjGame.stake=stake;
+      var st=gameStart(s,stake); if(!st.ok){toast(st.msg);return;}
+      _bjGame=bjDeal(bjState()); _bjGame.bet=st.bet;
       openModal('blackjack',{st:_bjGame});
       return;
     }
     if(g==='mines'){
-      _minesGame=minesInit(); _minesGame.stake=stake;
+      var st=gameStart(s,stake); if(!st.ok){toast(st.msg);return;}
+      _minesGame=minesInit(); _minesGame.bet=st.bet;
       openModal('mines',{st:_minesGame});
       return;
     }
@@ -859,9 +915,9 @@ var ACTIONS = {
   bjdouble:function(){
     if(!_bjGame||_bjGame.doubled) return;
     var s=S.save;
-    if(s.coins<_bjGame.stake){ toast('Не хватает 💨!'); return; }
-    _bjGame.doubled=true; _bjGame.stake*=2;
-    s.coins-=_bjGame.stake;
+    if(s.coins<_bjGame.bet){ toast('Не хватает 💨'); return; }
+    s.coins-=_bjGame.bet; _deltas.games-=_bjGame.bet;
+    _bjGame.bet*=2; _bjGame.doubled=true;
     save(); renderModal();
   },
   mine:function(arg){
@@ -874,9 +930,10 @@ var ACTIONS = {
     if(_minesGame.done && !_minesGame.boom && _minesGame.won) _minesGame.revealedCells.push(idx);
     if(_minesGame.done){
       var s=S.save;
-      var profit = _minesGame.won ? Math.round(_minesGame.stake*_minesGame.mult - _minesGame.stake) : -_minesGame.stake;
-      finishGame(s,_minesGame.won,profit); save(); checkAch(s);
-      toast(_minesGame.won?'🎉 Выигрыш x'+_minesGame.mult.toFixed(1)+' (+'+fmt(profit)+' 💨)':'💥 Проигрыш −'+fmt(_minesGame.stake)+' 💨');
+      var bet=_minesGame.bet;
+      var payout=_minesGame.won?Math.round(bet*_minesGame.mult):0;
+      gameEnd(s,_minesGame.won,payout); save(); checkAch(s);
+      toast(_minesGame.won?'🎉 Выигрыш x'+_minesGame.mult.toFixed(1)+' +'+fmt(payout)+' 💨':'💥 Проигрыш');
     }
     renderModal();
   },
@@ -884,9 +941,10 @@ var ACTIONS = {
     if(!_minesGame||_minesGame.done) return;
     mineCashout(_minesGame);
     var s=S.save;
-    var profit=_minesGame.won?Math.round(_minesGame.stake*_minesGame.mult-_minesGame.stake):-_minesGame.stake;
-    finishGame(s,_minesGame.won,profit); save(); checkAch(s);
-    toast('🛑 Забрал x'+_minesGame.mult.toFixed(1)+' (+'+fmt(profit)+' 💨)');
+    var bet=_minesGame.bet;
+    var payout=_minesGame.won?Math.round(bet*_minesGame.mult):0;
+    gameEnd(s,_minesGame.won,payout); save(); checkAch(s);
+    toast('🎉 Выигрыш x'+_minesGame.mult.toFixed(1)+' +'+fmt(payout)+' 💨');
     renderModal();
   },
   claimquest:function(){
@@ -894,7 +952,7 @@ var ACTIONS = {
     save(); checkAch(S.save); toast('🎁 +'+fmt(r)+' 💨!'); render();
   },
   clancreate:function(){
-    openModal('input',{title:'🏰 Создать клан', placeholder:'Название клана (2-20 символов)', action:function(s,val){ return clanCreate(s,val); }});
+    openModal('input',{title:'🏰 Создать клан', placeholder:'Название клана 2-20 символов', action:function(s,val){ return clanCreate(s,val); }});
   },
   clancontrib:function(){ openModal('clancontrib'); },
   clanq:function(arg){
@@ -909,19 +967,6 @@ var ACTIONS = {
   },
   clanleaveyes:function(){
     var r=clanLeave(S.save); save(); checkAch(S.save); toast(r.msg); closeModal();
-  },
-  leaderboard:function(){ openModal('leaderboard'); },
-  lbup:function(){
-    if(!SYNC_URL){ toast('⚠️ SYNC_URL не настроен — глобальный рейтинг недоступен'); renderModal(); return; }
-    lbLoad().then(function(data){
-      if(data && data.record){ lbSave(data.record); toast('🔄 Рейтинг обновлён ('+data.record.length+' игроков)'); }
-      else toast('⚠️ Не удалось загрузить рейтинг');
-      renderModal();
-    });
-  },
-  lbsend:function(){
-    if(!SYNC_URL){ toast('⚠️ SYNC_URL не настроен — некуда отправлять'); return; }
-    lbPush(S.save).then(function(ok){ toast(ok?'📤 Результат отправлен':'⚠️ Ошибка отправки'); });
   },
   botopen:function(){ openTgLink(botChatLink()); },
   botsave:function(){ openTgLink(botLinkMeLink(S.save)); },
@@ -974,17 +1019,10 @@ function openTgLink(url){
 function resolveBJ(){
   var s=S.save;
   var st=_bjGame;
-  var netGain = st.result==='win'?st.stake : st.result==='draw'?0 : -st.stake;
-  var profit;
-  if(st.doubled){
-    /* ставка уже списана при удвоении */
-    profit = st.result==='win' ? st.stake*2 : st.result==='draw' ? st.stake : 0;
-  } else {
-    profit = st.result==='win' ? st.stake*2-st.stake : st.result==='draw' ? 0 : -st.stake;
-  }
-  finishGame(s, st.result==='win', profit);
+  var payout = st.result==='win'? st.bet*2 : st.result==='draw'? st.bet : 0;
+  gameEnd(s, st.result==='win', payout);
   save(); checkAch(s);
-  toast(st.result==='win'?'🎉 Блэкджек-победа! +'+fmt(netGain)+' 💨':st.result==='draw'?'🤝 Ничья':'💸 Проигрыш −'+fmt(st.stake)+' 💨');
+  toast(st.result==='win'?'🎉 Блэкджек-победа! +'+fmt(payout)+' 💨':st.result==='draw'?'🤝 Ничья':'💸 Проигрыш');
   renderModal();
 }
 
@@ -1006,6 +1044,10 @@ function resolveBJ(){
     Tg.BackButton.onClick(function(){ if(modal) closeModal(); });
   }
   render();
+  apiInit(S.save).then(function(){ render(); });
+  setInterval(function(){ apiFlush(S.save); }, SYNC_EVERY_MS);
+  document.addEventListener('visibilitychange', function(){ if(document.hidden) apiFlush(S.save); });
+  window.addEventListener('pagehide', function(){ apiFlush(S.save); });
 })();
 
 /* экспорт для Node-тестов */
@@ -1020,9 +1062,11 @@ if (typeof module !== 'undefined' && module.exports) {
     bjState:bjState, bjDeal:bjDeal, bjHit:bjHit, bjFinish:bjFinish, handVal:handVal,
     minesInit:minesInit, mineReveal:mineReveal, mineCashout:mineCashout,
     stakeLabel:stakeLabel,
-    rankOf:rankOf, finishGame:finishGame, todayStr:todayStr, yesterdayStr:yesterdayStr,
+    rankOf:rankOf, finishGame:finishGame, gameStart:gameStart, gameEnd:gameEnd,
+    apiInit:apiInit, apiFlush:apiFlush, apiTop:apiTop, apiCall:apiCall, _deltas:_deltas,
+    todayStr:todayStr, yesterdayStr:yesterdayStr,
     clanCreate:clanCreate, clanContribute:clanContribute, clanLeave:clanLeave,
     clanLevelOf:clanLevelOf, clanBonusOf:clanBonusOf, pushNotify:pushNotify,
-    lbCache:lbCache, lbSave:lbSave, inviteLink:inviteLink, inviteViaBot:inviteViaBot,
+    spinDay:spinDay, inviteLink:inviteLink, inviteViaBot:inviteViaBot,
     botChatLink:botChatLink, botLinkMeLink:botLinkMeLink, BOT_USERNAME:BOT_USERNAME};
 }
