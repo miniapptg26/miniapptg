@@ -4,7 +4,6 @@
 var CFG = {
   GROWTH: 1.8,
   CLICK_BASE: 50, AUTO_BASE: 100, CRIT_BASE: 150,
-  COOLDOWN_MS: 1000,
   TICK_SEC: 5, TICKS_PER_MIN: 12,
   OFFLINE_MIN_MIN: 2, OFFLINE_MAX_MIN: 240,
   TURBO_COST: 800, TURBO_SEC: 120,
@@ -234,8 +233,6 @@ function applyReferral(s, startParam){
 /* ---- Клик ---- */
 function doClick(s){
   var now = Date.now();
-  if(now - (s._lastClick||0) < CFG.COOLDOWN_MS) return null;
-  s._lastClick = now;
   var crit = Math.random()*100 < totalCrit(s);
   var gain = totalClickPower(s)*(crit?2:1);
   var turbo = turboActive(s);
@@ -597,19 +594,20 @@ function renderModal(){
         '</div>';
     } else if(g==='coin'){
       inner = '<div class="h1">🪙 Орёл / Решка</div><div class="muted" style="margin-bottom:10px">50/50, выигрыш x2</div>' +
-        '<button class="btn gold" data-act="playcoin">🪙 Бросить</button>';
+        '<button class="btn gold" data-act="stake" data-arg="coin">🪙 Сыграть (своя ставка)</button>';
     } else if(g==='blackjack'){
       inner = '<div class="h1">🃏 Блэкджек</div><div class="muted" style="margin-bottom:10px">Против банка. Туз = 11/1, В/Д/К = 10. Собери 21 или перебей банк!</div>' +
-        '<button class="btn" data-act="bjdeal">🃏 Сыграть</button>';
+        '<button class="btn" data-act="stake" data-arg="blackjack">🃏 Сыграть (своя ставка)</button>';
     } else if(g==='mines'){
       inner = '<div class="h1">💣 Сапёр</div><div class="muted" style="margin-bottom:10px">Поле 3×3 с 2 минами. Открывай клетки — множитель растёт. Мина = проигрыш!</div>' +
-        '<button class="btn" data-act="minesstart">💣 Старт</button>';
+        '<button class="btn" data-act="stake" data-arg="mines">💣 Старт (своя ставка)</button>';
     }
     inner += '<button class="btn ghost small" data-act="closemodal" style="margin-top:10px">⬅️ Назад</button>';
   }
   else if(t==='stake'){
     var gname = modal.data.game;
-    var lab = gname==='roulette'?'🎡 Рулетка — ставка на «'+stakeLabel(modal.data.arg)+'»':gname==='dice'?'🎲 Кубики — ставка на «'+stakeLabel(modal.data.arg)+'»':'Ставка';
+    var gt = {roulette:'🎡 Рулетка',dice:'🎲 Кубики',coin:'🪙 Орёл/Решка',blackjack:'🃏 Блэкджек',mines:'💣 Сапёр'}[gname]||'🎮 Игра';
+    var lab = gt+' — ставка на «'+stakeLabel(modal.data.arg)+'»';
     inner = '<div class="h1">'+lab+'</div>' +
       '<input type="number" id="stake-inp" min="'+CFG.MIN_STAKE+'" placeholder="Ставка (мин '+CFG.MIN_STAKE+')">' +
       '<button class="btn" data-act="dogame">🎲 Сыграть</button>' +
@@ -706,7 +704,7 @@ function leaderboardHtml(s){
   return h;
 }
 function stakeLabel(arg){
-  return {num:'🎯 число',red:'🔴 красное',black:'⚫ чёрное',d1:'1-12',d2:'13-24',d3:'25-36',gt:'больше 7',lt:'меньше 7',eq:'ровно 7'}[arg]||arg;
+  return {num:'🎯 число',red:'🔴 красное',black:'⚫ чёрное',d1:'1-12',d2:'13-24',d3:'25-36',gt:'больше 7',lt:'меньше 7',eq:'ровно 7',coin:'🪙 орёл/решка',blackjack:'🃏 блэкджек',mines:'💣 сапёр'}[arg]||arg;
 }
 function bjHtml(st){
   var hv = handVal(st.hand), bv = handVal(st.bank);
@@ -809,17 +807,6 @@ var ACTIONS = {
     if(!modal||!modal.data.game) return;
     openModal('stake',{game:modal.data.game,arg:arg});
   },
-  playcoin:function(){
-    var s=S.save;
-    var res=playCoin();
-    var stake=CFG.MIN_STAKE;
-    if(s.coins<stake){ toast('Не хватает 💨!'); return; }
-    var win=res.heads; var profit=win?stake:(-stake);
-    finishGame(s, win, profit);
-    save(); checkAch(s);
-    toast((win?'🪙 Орёл! 🎉 +'+fmt(profit)+' 💨':'🪙 Решка! 💸 −'+fmt(stake)+' 💨'));
-    render(); closeModal();
-  },
   dogame:function(){
     var inp=document.getElementById('stake-inp');
     var stake=parseInt(inp?inp.value:'',10);
@@ -833,15 +820,36 @@ var ACTIONS = {
       var col=r.n===0?'🟢':r.red?'🔴':'⚫';
       finishGame(s,r.win,profit); save(); checkAch(s);
       toast('🎡 '+r.n+' '+col+(r.win?' 🎉 +'+fmt(profit)+' 💨 (x'+r.mult+')':' 💸 −'+fmt(stake)+' 💨'));
-    } else if(g==='dice'){
+      render(); closeModal();
+      return;
+    }
+    if(g==='dice'){
       var d=playDice(s,arg);
       var profit2=d.win?stake*d.mult-stake:-stake;
       finishGame(s,d.win,profit2); save(); checkAch(s);
       toast('🎲 '+d.a+' + '+d.b+' = '+d.total+(d.win?' 🎉 +'+fmt(profit2)+' 💨':' 💸 −'+fmt(stake)+' 💨'));
+      render(); closeModal();
+      return;
     }
-    render(); closeModal();
+    if(g==='coin'){
+      var c=playCoin();
+      var profit3=c.heads?stake:-stake;
+      finishGame(s,c.heads,profit3); save(); checkAch(s);
+      toast(c.heads?'🪙 Орёл! 🎉 +'+fmt(profit3)+' 💨':'🪙 Решка! 💸 −'+fmt(stake)+' 💨');
+      render(); closeModal();
+      return;
+    }
+    if(g==='blackjack'){
+      _bjGame=bjDeal(bjState()); _bjGame.stake=stake;
+      openModal('blackjack',{st:_bjGame});
+      return;
+    }
+    if(g==='mines'){
+      _minesGame=minesInit(); _minesGame.stake=stake;
+      openModal('mines',{st:_minesGame});
+      return;
+    }
   },
-  bjdeal:function(){ _bjGame=bjDeal(bjState()); _bjGame.stake=CFG.MIN_STAKE; openModal('blackjack',{st:_bjGame}); },
   bjhit:function(){ if(!_bjGame) return; bjHit(_bjGame); renderModal(); },
   bjsure:function(){
     if(!_bjGame) return;
@@ -856,7 +864,6 @@ var ACTIONS = {
     s.coins-=_bjGame.stake;
     save(); renderModal();
   },
-  minesstart:function(){ _minesGame=minesInit(); _minesGame.stake=CFG.MIN_STAKE; openModal('mines',{st:_minesGame}); },
   mine:function(arg){
     if(!_minesGame||_minesGame.done) return;
     var idx=parseInt(arg,10);
@@ -1012,6 +1019,7 @@ if (typeof module !== 'undefined' && module.exports) {
     playRoulette:playRoulette, playDice:playDice, playCoin:playCoin,
     bjState:bjState, bjDeal:bjDeal, bjHit:bjHit, bjFinish:bjFinish, handVal:handVal,
     minesInit:minesInit, mineReveal:mineReveal, mineCashout:mineCashout,
+    stakeLabel:stakeLabel,
     rankOf:rankOf, finishGame:finishGame, todayStr:todayStr, yesterdayStr:yesterdayStr,
     clanCreate:clanCreate, clanContribute:clanContribute, clanLeave:clanLeave,
     clanLevelOf:clanLevelOf, clanBonusOf:clanBonusOf, pushNotify:pushNotify,
