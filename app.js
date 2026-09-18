@@ -1,4 +1,5 @@
 'use strict';
+var API_URL = 'https://vapeded1.amvera.io';
 
 /* ===== Конфигурация ===== */
 var CFG = {
