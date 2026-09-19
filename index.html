@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Вейп-Кликер — Telegram Mini App</title>
+<meta name="description" content="Idle-кликер в мире вейпинга: тяни облака, прокачивайся, собирай арсенал, играй в азартные игры и расти в рейтинге.">
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="bgfx"><i></i><i></i><i></i><i></i><i></i></div>
+<div id="app">
+  <header class="topbar">
+    <div class="logo">💨 Вейп-Кликер</div>
+    <div class="tb-right">
+      <button class="bell" data-act="notify" aria-label="Уведомления">🔔<span class="bell-badge" id="bell-badge"></span></button>
+      <div class="balance" id="balance-top">💰 0</div>
+    </div>
+  </header>
+  <div class="toast" id="banner"></div>
+  <main id="screen"></main>
+  <nav class="bottomnav" id="bottomnav">
+    <button class="navbtn" data-act="tab" data-arg="home">🏠<span>Главная</span></button>
+    <button class="navbtn" data-act="tab" data-arg="shop">🛒<span>Магазин</span></button>
+    <button class="navbtn" data-act="tab" data-arg="games">🎲<span>Игры</span></button>
+    <button class="navbtn" data-act="tab" data-arg="quest">📋<span>Квест</span></button>
+    <button class="navbtn" data-act="tab" data-arg="clan">🏰<span>Клан</span></button>
+    <button class="navbtn" data-act="tab" data-arg="profile">👤<span>Профиль</span></button>
+  </nav>
+</div>
+<div id="modal-root"></div>
+<script src="app.js"></script>
+</body>
+</html>
